@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "378281753444",
+    "project_id": "automacao-5843f",
+    "storage_bucket": "automacao-5843f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:378281753444:android:915c5af0774b1e4d819871",
+        "android_client_info": {
+          "package_name": "com.example.automacao"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB2AxOKm-h_H5G0CW3_ItTr6f-FR5WEz2c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
