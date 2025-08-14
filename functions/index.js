@@ -1,34 +1,59 @@
-
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 admin.initializeApp();
 
-async function isCallerAdmin(context) {
-  const uidCaller = context.auth?.uid;
-  if (!uidCaller) {
-    throw new functions.https.HttpsError("unauthenticated", "Faça login.");
-  }
-  const doc = await admin.firestore().collection("usuarios").doc(uidCaller).get();
-  if (!doc.exists || doc.data()?.role !== "admin") {
-    throw new functions.https.HttpsError("permission-denied", "Apenas admin pode executar esta ação.");
+async function assertRequesterIsAdmin(uid) {
+  const snap = await admin.firestore().collection("usuarios").doc(uid).get();
+  const role = snap.exists ? snap.data().role : undefined;
+  if (role !== "admin") {
+    throw new functions.https.HttpsError(
+      "permission-denied",
+      "Apenas administradores podem excluir usuários."
+    );
   }
 }
 
-exports.adminDeleteUser = functions.https.onCall(async (data, context) => {
-  await isCallerAdmin(context);
+exports.adminDeleteUser = functions
+  .region("southamerica-east1")
+  .https.onCall(async (data, context) => {
+    try {
+      if (!context.auth) {
+        throw new functions.https.HttpsError(
+          "unauthenticated",
+          "Faça login para executar esta ação."
+        );
+      }
 
-  const uidToDelete = data?.uid;
-  if (!uidToDelete || typeof uidToDelete !== "string") {
-    throw new functions.https.HttpsError("invalid-argument", "Parâmetro 'uid' inválido ou ausente.");
-  }
+      const requesterUid = context.auth.uid;
+      await assertRequesterIsAdmin(requesterUid);
 
-  await admin.auth().deleteUser(uidToDelete);
+      const targetUid = data && data.uid;
+      if (!targetUid || typeof targetUid !== "string") {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          'Parâmetro "uid" é obrigatório.'
+        );
+      }
+      if (targetUid === requesterUid) {
+        throw new functions.https.HttpsError(
+          "failed-precondition",
+          "Você não pode excluir a própria conta de admin."
+        );
+      }
 
-  await admin.firestore().collection("usuarios").doc(uidToDelete).set({
-    ativo: false,
-    deletedAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, { merge: true });
+      await admin.auth().deleteUser(targetUid).catch((err) => {
+        if (err && err.code !== "auth/user-not-found") throw err;
+      });
 
-  return { ok: true };
-});
+      await admin.firestore().collection("usuarios").doc(targetUid).delete().catch(() => {});
 
+      return { ok: true };
+    } catch (err) {
+      console.error("adminDeleteUser error", err);
+      throw new functions.https.HttpsError(
+        "internal",
+        err && err.message ? err.message : "Erro interno ao excluir usuário",
+        { code: err && err.code }
+      );
+    }
+  });

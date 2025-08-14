@@ -1200,16 +1200,12 @@ class _HomePageState extends State<HomePage> {
                 ventPrimeiroAndar = v;
               });
 
-              // Se seu ESP32 não diferencia por cômodo, o endpoint geral segue igual:
               await enviarComandoEsp(
                   v ? '/ventilador/ligar' : '/ventilador/desligar');
 
-              // Status global consolidado por andar
               await DispositivoService.setStatus("VentPrimeiroAndar", v);
             },
           ),
-
-          // SEGUNDO ANDAR:
           _ventCard(
             title: "Segundo andar",
             value: ventSegundoAndar,
@@ -1499,7 +1495,9 @@ class PerfilPage extends StatelessWidget {
                           style: const TextStyle(color: Colors.white70),
                         ),
                       ],
-                      const SizedBox(height: 40),
+
+                      const SizedBox(height: 32),
+
                       ElevatedButton.icon(
                         icon: const Icon(Icons.logout, color: Colors.black),
                         style: ElevatedButton.styleFrom(
@@ -1528,6 +1526,23 @@ class PerfilPage extends StatelessWidget {
                           ),
                         ),
                       ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.edit, size: 18),
+                        label: const Text('Editar perfil'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white24),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: () {
+                          Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => const EditProfilePage()));
+                        },
+                      ),
                     ],
                   );
                 },
@@ -1536,6 +1551,402 @@ class PerfilPage extends StatelessWidget {
     );
   }
 }
+
+// ---------------- EDIT PROFILE PAGE (clean & bonita) ----------------
+class EditProfilePage extends StatefulWidget {
+  const EditProfilePage({super.key});
+
+  @override
+  State<EditProfilePage> createState() => _EditProfilePageState();
+}
+
+class _EditProfilePageState extends State<EditProfilePage> {
+  final _nameCtrl = TextEditingController();
+  final _oldPassCtrl = TextEditingController();
+  final _newPassCtrl = TextEditingController();
+  final _newPass2Ctrl = TextEditingController();
+
+  PerfilUsuario? _perfil;
+
+  bool _loading = true;
+  bool _savingName = false;
+  bool _changingPass = false;
+
+  bool _showOld = false;
+  bool _showNew = false;
+  bool _showNew2 = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final u = usuarioLogado;
+    if (u == null) {
+      setState(() => _loading = false);
+      return;
+    }
+    final p = await UserService.carregarPerfil(u.uid);
+    _perfil = p;
+    _nameCtrl.text = (p?.nome.trim().isNotEmpty == true)
+        ? p!.nome
+        : (u.nome.trim().isNotEmpty ? u.nome : u.email);
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _saveName() async {
+    final u = usuarioLogado;
+    if (u == null) return;
+
+    final newName = _nameCtrl.text.trim();
+    if (newName.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Digite um nome válido (mín. 2 caracteres).')),
+      );
+      return;
+    }
+    if (newName == (_perfil?.nome ?? '')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nada para salvar.')),
+      );
+      return;
+    }
+
+    setState(() => _savingName = true);
+    try {
+      await UserService.atualizarCampo(u.uid, {'nome': newName});
+
+      // atualiza cache local
+      usuarioLogado = UsuarioLogado(
+        email: u.email,
+        nome: newName,
+        uid: u.uid,
+        idToken: u.idToken,
+      );
+      _perfil = PerfilUsuario(
+        uid: _perfil?.uid ?? u.uid,
+        email: _perfil?.email ?? u.email,
+        nome: newName,
+        role: _perfil?.role ?? 'user',
+        ativo: _perfil?.ativo ?? true,
+        createdAt: _perfil?.createdAt ?? DateTime.now(),
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nome atualizado com sucesso!')),
+      );
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erro ao salvar nome: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _savingName = false);
+    }
+  }
+
+  Future<void> _changePassword() async {
+    final user = FirebaseAuth.instance.currentUser;
+    final email = user?.email;
+
+    final oldPass = _oldPassCtrl.text;
+    final newPass = _newPassCtrl.text;
+    final newPass2 = _newPass2Ctrl.text;
+
+    if (email == null || email.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Não foi possível identificar seu e-mail.')),
+      );
+      return;
+    }
+    if (oldPass.isEmpty || newPass.isEmpty || newPass2.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Preencha todos os campos de senha.')),
+      );
+      return;
+    }
+    if (newPass.length < 6) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('A nova senha deve ter pelo menos 6 caracteres.')),
+      );
+      return;
+    }
+    if (newPass != newPass2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('A confirmação não corresponde à nova senha.')),
+      );
+      return;
+    }
+
+    setState(() => _changingPass = true);
+    try {
+      // reautentica com a senha atual
+      final cred = EmailAuthProvider.credential(email: email, password: oldPass);
+      await user!.reauthenticateWithCredential(cred);
+
+      // atualiza para a nova senha
+      await user.updatePassword(newPass);
+
+      _oldPassCtrl.clear();
+      _newPassCtrl.clear();
+      _newPass2Ctrl.clear();
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Senha alterada com sucesso!')),
+      );
+      Navigator.pop(context);
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Senha atual incorreta!')),
+    );
+    return; // não mostra mensagem genérica
+  }
+      final msg = e.message ?? e.code;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Falha ao alterar senha: $msg')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Falha ao alterar senha: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _changingPass = false);
+    }
+  }
+
+  InputDecoration _dec({
+    required String label,
+    Widget? icon,
+    Widget? suffix,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      labelStyle: const TextStyle(color: Colors.white54),
+      prefixIcon: icon,
+      suffixIcon: suffix,
+      filled: true,
+      fillColor: Colors.black26,
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+    );
+  }
+
+  Widget _sectionCard({required String title, required List<Widget> children}) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white12),
+        boxShadow: const [
+          BoxShadow(color: Colors.black26, blurRadius: 24, offset: Offset(0, 12)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(children: [
+            const Icon(Icons.person_outline, color: kYellow, size: 22),
+            const SizedBox(width: 8),
+            Text(title,
+                style: const TextStyle(
+                  fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white,
+                )),
+          ]),
+          const SizedBox(height: 14),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentEmail = FirebaseAuth.instance.currentUser?.email ?? '';
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: kGradientStart,
+        title: const Text('Editar perfil'),
+        centerTitle: true,
+      ),
+      body: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [kGradientStart, kGradientEnd],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 480),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(16, 18, 16, 28),
+                    child: Column(
+                      children: [
+                        // ===== Seção: Dados básicos =====
+                        _sectionCard(
+                          title: 'Informações da conta',
+                          children: [
+                            // Email (read-only)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.04),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.white12),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.alternate_email, color: Colors.white60),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      currentEmail,
+                                      style: const TextStyle(color: Colors.white70, fontSize: 14),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+
+                            // Nome
+                            TextField(
+                              controller: _nameCtrl,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _dec(
+                                label: 'Nome de usuário',
+                                icon: const Icon(Icons.badge_outlined, color: Colors.white70),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              height: 46,
+                              child: ElevatedButton.icon(
+                                onPressed: _savingName ? null : _saveName,
+                                icon: _savingName
+                                    ? const SizedBox(width: 18, height: 18,
+                                        child: CircularProgressIndicator(strokeWidth: 2))
+                                    : const Icon(Icons.save, color: Colors.black),
+                                label: Text(
+                                  _savingName ? 'Salvando...' : 'Salvar nome',
+                                  style: const TextStyle(
+                                      color: Colors.black, fontWeight: FontWeight.bold),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: kYellow,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        // ===== Seção: Trocar senha =====
+                        _sectionCard(
+                          title: 'Alterar senha',
+                          children: [
+                            TextField(
+                              controller: _oldPassCtrl,
+                              obscureText: !_showOld,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _dec(
+                                label: 'Senha atual',
+                                icon: const Icon(Icons.lock_outline, color: Colors.white70),
+                                suffix: IconButton(
+                                  icon: Icon(_showOld ? Icons.visibility_off : Icons.visibility),
+                                  onPressed: () => setState(() => _showOld = !_showOld),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: _newPassCtrl,
+                              obscureText: !_showNew,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _dec(
+                                label: 'Nova senha (mín. 6 caracteres)',
+                                icon: const Icon(Icons.key_outlined, color: Colors.white70),
+                                suffix: IconButton(
+                                  icon: Icon(_showNew ? Icons.visibility_off : Icons.visibility),
+                                  onPressed: () => setState(() => _showNew = !_showNew),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: _newPass2Ctrl,
+                              obscureText: !_showNew2,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _dec(
+                                label: 'Confirmar nova senha',
+                                icon: const Icon(Icons.key, color: Colors.white70),
+                                suffix: IconButton(
+                                  icon: Icon(_showNew2 ? Icons.visibility_off : Icons.visibility),
+                                  onPressed: () => setState(() => _showNew2 = !_showNew2),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              height: 46,
+                              child: ElevatedButton.icon(
+                                onPressed: _changingPass ? null : _changePassword,
+                                icon: _changingPass
+                                    ? const SizedBox(width: 18, height: 18,
+                                        child: CircularProgressIndicator(strokeWidth: 2))
+                                    : const Icon(Icons.check, color: Colors.black),
+                                label: Text(
+                                  _changingPass ? 'Alterando...' : 'Alterar senha',
+                                  style: const TextStyle(
+                                      color: Colors.black, fontWeight: FontWeight.bold),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: kYellow,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _oldPassCtrl.dispose();
+    _newPassCtrl.dispose();
+    _newPass2Ctrl.dispose();
+    super.dispose();
+  }
+}
+
 
 // ---------- CENÁRIOS PAGE  -----------
 class CenariosPage extends StatefulWidget {
@@ -1568,24 +1979,20 @@ class _CenariosPageState extends State<CenariosPage> {
         await enviarComandoEsp(estado ? '/portao/abrir' : '/portao/fechar');
         await DispositivoService.setStatus("Portao", estado);
       } else if (dispositivo == 'VentPrimeiroAndar') {
-        // Se seu ESP tiver endpoints separados, troque por /vent1/ligar|desligar
         await enviarComandoEsp(
             estado ? '/ventilador/ligar' : '/ventilador/desligar');
         await DispositivoService.setStatus("VentPrimeiroAndar", estado);
       } else if (dispositivo == 'VentSegundoAndar') {
-        // Se tiver endpoint separado, troque por /vent2/ligar|desligar
         await enviarComandoEsp(
             estado ? '/ventilador/ligar' : '/ventilador/desligar');
         await DispositivoService.setStatus("VentSegundoAndar", estado);
       } else {
-        // Luzes: Sala, Cozinha, Banheiro, Quarto
         await enviarComandoEsp(
             estado ? '/ligar/$dispositivo' : '/desligar/$dispositivo');
         await DispositivoService.setStatus(dispositivo, estado);
       }
     }
 
-    // Atualiza switches da HomePage
     final homeState = context.findAncestorStateOfType<_HomePageState>();
     if (homeState != null) {
       await homeState._carregarStatusDispositivos();
@@ -1774,7 +2181,6 @@ class _CenarioFormState extends State<CenarioForm> {
 
   @override
   Widget build(BuildContext context) {
-    // helper local para rotular os dispositivos
     String label(String k) {
       switch (k) {
         case 'VentPrimeiroAndar':
@@ -1799,15 +2205,12 @@ class _CenarioFormState extends State<CenarioForm> {
               decoration: const InputDecoration(labelText: 'Nome do Cenário'),
             ),
             const SizedBox(height: 12),
-
-            // usa o helper para rotular cada item
             ...dispositivosSelecionados.keys.map((key) => CheckboxListTile(
                   title: Text(label(key)),
                   value: dispositivosSelecionados[key],
                   onChanged: (v) => setState(
                       () => dispositivosSelecionados[key] = v ?? false),
                 )),
-
             const SizedBox(height: 20),
             ElevatedButton(
               onPressed: _salvar,
@@ -1890,7 +2293,6 @@ class _DeviceLogsPageState extends State<DeviceLogsPage> {
       q = q.where('ts', isLessThanOrEqualTo: Timestamp.fromDate(_to!));
     }
 
-    // range por ts exige orderBy(ts)
     q = q.orderBy('ts', descending: true).limit(500);
     return q;
   }
@@ -1917,10 +2319,9 @@ class _DeviceLogsPageState extends State<DeviceLogsPage> {
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [kGradientStart, kGradientEnd],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
+              colors: [kGradientStart, kGradientEnd],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight),
         ),
         child: Column(
           children: [
@@ -2028,6 +2429,19 @@ class _DeviceLogsPageState extends State<DeviceLogsPage> {
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: _buildQuery().snapshots(),
                 builder: (context, snap) {
+                  if (snap.hasError) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(
+                          'Erro ao carregar logs:\n${snap.error}\n\n'
+                          'Se aparecer "requires index", abra o link para criar o índice no console.',
+                          style: const TextStyle(color: Colors.redAccent),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    );
+                  }
                   if (snap.connectionState == ConnectionState.waiting) {
                     return const Center(child: CircularProgressIndicator());
                   }
@@ -2254,7 +2668,6 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
                                   await callable
                                       .call(<String, dynamic>{'uid': p.uid});
 
-                                  // Remove o documento de perfil para “sumir” da lista
                                   await FirebaseFirestore.instance
                                       .collection('usuarios')
                                       .doc(p.uid)
