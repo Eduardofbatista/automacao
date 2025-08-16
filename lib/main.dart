@@ -1,3 +1,4 @@
+// ignore_for_file: use_build_context_synchronously
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -177,46 +178,44 @@ Future<UsuarioLogado> registerWithEmail(
 class CenarioService {
   static CollectionReference<Map<String, dynamic>> _cenariosRef() {
     final usuario = usuarioLogado;
-    if (usuario == null) throw Exception('Usuário não logado!');
-    final uid = usuario.uid;
+    if (usuario == null) {
+      throw Exception('Usuário não logado!');
+    }
     return FirebaseFirestore.instance
         .collection('usuarios')
-        .doc(uid)
+        .doc(usuario.uid)
         .collection('cenarios');
   }
 
-  // (mantido para cenários; status agora é global via DispositivoService)
-
+  /// Busca os cenários do usuário logado
   static Future<List<Cenario>> buscarCenarios() async {
-    final snap = await _cenariosRef().get();
+    final snap = await _cenariosRef().orderBy('nome').get();
     return snap.docs
         .map((doc) => Cenario(
               id: doc.id,
-              nome: doc['nome'] ?? '',
-              dispositivos: Map<String, bool>.from(doc['dispositivos'] ?? {}),
+              nome: (doc.data()['nome'] ?? '') as String,
+              dispositivos:
+                  Map<String, bool>.from(doc.data()['dispositivos'] ?? {}),
             ))
         .toList();
   }
 
+  /// Cria/atualiza cenário (usa id se existir; senão usa o nome como id)
   static Future<void> salvarCenario(Cenario cenario) async {
     final ref = _cenariosRef();
-    try {
-      if (cenario.id != null) {
-        await ref.doc(cenario.id).set({
-          'nome': cenario.nome,
-          'dispositivos': cenario.dispositivos,
-        });
-      } else {
-        await ref.doc(cenario.nome).set({
-          'nome': cenario.nome,
-          'dispositivos': cenario.dispositivos,
-        });
-      }
-    } catch (e) {
-      rethrow;
+    final data = <String, dynamic>{
+      'nome': cenario.nome,
+      'dispositivos': cenario.dispositivos,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+    if (cenario.id != null && cenario.id!.isNotEmpty) {
+      await ref.doc(cenario.id!).set(data, SetOptions(merge: true));
+    } else {
+      await ref.doc(cenario.nome).set(data, SetOptions(merge: true));
     }
   }
 
+  /// Exclui cenário pelo id
   static Future<void> excluirCenario(String id) async {
     await _cenariosRef().doc(id).delete();
   }
@@ -348,6 +347,7 @@ class MyApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: Colors.transparent,
         colorScheme: const ColorScheme.dark(primary: kYellow),
+        appBarTheme: const AppBarTheme(backgroundColor: kGradientStart),
       ),
       home: const LoginPage(),
     );
@@ -592,14 +592,13 @@ class _RegisterPageState extends State<RegisterPage> {
       return;
     }
     if (senha != confirmarSenha) {
-      setState(() => erroMsg = "As senhas não coincidem.");
+      setState(() => erroMsg = "Confirmação da nova senha não confere.");
       return;
     }
 
     try {
       final usuario = await registerWithEmail(email, senha, nome);
       usuarioLogado = usuario;
-      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Conta criada com sucesso!")),
       );
@@ -786,6 +785,283 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 }
 
+// ----------------- APP DRAWER -----------------
+class AppDrawer extends StatelessWidget {
+  final PerfilUsuario? perfil;
+  const AppDrawer({super.key, required this.perfil});
+
+  void _go(BuildContext context, Widget page) {
+    Navigator.pop(context);
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => page));
+  }
+
+  Future<void> _confirmLogout(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sair'),
+        content: const Text('Deseja realmente sair da sua conta?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Sair')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await FirebaseAuth.instance.signOut();
+      usuarioLogado = null;
+      if (context.mounted) {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const LoginPage()),
+          (_) => false,
+        );
+      }
+    }
+  }
+
+  Widget _roleChip(String role) {
+    final isAdmin = role == 'admin';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: (isAdmin ? Colors.greenAccent : Colors.blueAccent).withOpacity(.15),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: (isAdmin ? Colors.greenAccent : Colors.blueAccent).withOpacity(.35),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(isAdmin ? Icons.verified_user : Icons.person_outline, size: 16,
+              color: isAdmin ? Colors.greenAccent : Colors.blueAccent),
+          const SizedBox(width: 6),
+          Text(
+            isAdmin ? 'admin' : 'user',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: isAdmin ? Colors.greenAccent : Colors.blueAccent,
+              letterSpacing: .2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _navTile(
+    BuildContext context, {
+    required IconData icon,
+    required String title,
+    String? subtitle,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      leading: Icon(icon, color: Colors.white.withOpacity(.9)),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+      subtitle: subtitle == null
+          ? null
+          : Text(subtitle, style: TextStyle(color: Colors.white.withOpacity(.6))),
+      trailing: Icon(Icons.chevron_right, color: Colors.white.withOpacity(.6)),
+      onTap: onTap,
+      horizontalTitleGap: 12,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final nome = perfil?.nome ?? usuarioLogado?.nome ?? '';
+    final email = perfil?.email ?? usuarioLogado?.email ?? '';
+    final role = perfil?.role ?? 'user';
+    final isAdmin = role == 'admin';
+
+    return Drawer(
+      backgroundColor: const Color(0xFF141A22),
+      child: SafeArea(
+        child: Column(
+          children: [
+            // ---------- HEADER BONITÃO ----------
+            ClipRRect(
+              borderRadius: const BorderRadius.only(
+                bottomLeft: Radius.circular(24),
+                bottomRight: Radius.circular(24),
+              ),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [kGradientStart, Color(0xFF2B3A47)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(.08),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: const CircleAvatar(
+                        radius: 28,
+                        backgroundColor: kYellow,
+                        child: Icon(Icons.person, color: Colors.black, size: 28),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            (nome.isEmpty ? email : nome),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            email,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(.75),
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          _roleChip(role),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            // ---------- ITENS DE NAVEGAÇÃO ----------
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+                children: [
+                  _navTile(
+                    context,
+                    icon: Icons.home_rounded,
+                    title: 'Início',
+                    onTap: () => _go(context, const HomePage()),
+                  ),
+                  _navTile(
+                    context,
+                    icon: Icons.person_rounded,
+                    title: 'Meu Perfil',
+                    onTap: () => _go(context, const PerfilPage()),
+                  ),
+                  if (isAdmin) ...[
+                    const Padding(
+                      padding: EdgeInsets.only(left: 12, top: 12, bottom: 6),
+                      child: Text('Administração',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.white70, letterSpacing: .3)),
+                    ),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(.03),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Column(
+                        children: [
+                          _navTile(
+                            context,
+                            icon: Icons.history_rounded,
+                            title: 'Logs de Dispositivos',
+                            subtitle: 'Acompanhe as alterações',
+                            onTap: () => _go(context, const DeviceLogsPage()),
+                          ),
+                          const Divider(height: 1, color: Colors.white12, indent: 56),
+                          _navTile(
+                            context,
+                            icon: Icons.supervisor_account_rounded,
+                            title: 'Controle de Usuários',
+                            subtitle: 'Gerencie papéis e acesso',
+                            onTap: () => _go(context, const AdminUsersPage()),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent.withOpacity(.08),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.redAccent.withOpacity(.25)),
+                    ),
+                    child: _navTile(
+                      context,
+                      icon: Icons.logout_rounded,
+                      title: 'Sair',
+                      onTap: () => _confirmLogout(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // ---------- RODAPÉ ----------
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+              child: Row(
+                children: [
+                  Icon(Icons.bolt_rounded, size: 16, color: Colors.white.withOpacity(.6)),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Casa Inteligente • v1.0.0',
+                    style: TextStyle(color: Colors.white.withOpacity(.6), fontSize: 12),
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(.05),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Text(
+                      'online',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.greenAccent.withOpacity(.9),
+                        letterSpacing: .3,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+
+
 // -------------- HOME PAGE -------------------
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -798,25 +1074,24 @@ class _HomePageState extends State<HomePage> {
   late PageController _pageController;
   Map<int, bool> statusCenarios = {};
 
-  // Perfil
   PerfilUsuario? _perfil;
-
-  // Listener global de dispositivos
   StreamSubscription<List<DispositivoInfo>>? _dispSub;
 
-  // Luzes e outros controles
+  // Luzes
   bool todasLuzes = false;
   bool sala = false;
   bool cozinha = false;
   bool banheiro = false;
   bool quarto = false;
 
+  // Ventilação
   bool ventPrimeiroAndar = false;
   bool ventSegundoAndar = false;
 
+  // Portão
   bool portaoAberto = false;
 
-  // -------------------- CENÁRIOS FIRESTORE ---------------------
+  // Cenários
   List<Cenario> cenarios = [];
   bool loadingCenarios = true;
 
@@ -825,27 +1100,22 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _pageController = PageController(initialPage: selectedTab);
     _carregarCenarios();
-    _carregarStatusDispositivos(); // agora global
+    _carregarStatusDispositivos();
     _carregarPerfil();
-    _iniciarListenerDispositivos(); // escuta mudanças globais em tempo real
+    _iniciarListenerDispositivos();
   }
 
   void _iniciarListenerDispositivos() {
     _dispSub = DispositivoService.streamDispositivos().listen((lista) {
       final map = {for (final d in lista) d.nome: d.ligado};
       setState(() {
-        // Luzes
         sala = map['Sala'] ?? false;
         cozinha = map['Cozinha'] ?? false;
         banheiro = map['Banheiro'] ?? false;
         quarto = map['Quarto'] ?? false;
         todasLuzes = sala && cozinha && banheiro && quarto;
-
-        // Ventiladores
         ventPrimeiroAndar = map['VentPrimeiroAndar'] ?? false;
         ventSegundoAndar = map['VentSegundoAndar'] ?? false;
-
-        // Portão
         portaoAberto = map['Portao'] ?? false;
       });
     });
@@ -866,7 +1136,7 @@ class _HomePageState extends State<HomePage> {
         cenarios = lista;
         loadingCenarios = false;
       });
-    } catch (e) {
+    } catch (_) {
       setState(() => loadingCenarios = false);
     }
   }
@@ -887,17 +1157,15 @@ class _HomePageState extends State<HomePage> {
         portaoAberto = status['Portao'] ?? false;
       });
     } catch (e) {
-      print('Erro ao carregar status global: $e');
+      debugPrint('Erro ao carregar status global: $e');
     }
   }
 
   Future<void> _adicionarOuEditarCenario(Cenario novo, {int? index}) async {
     if (index != null) {
       final cenarioAtual = cenarios[index];
-      final atualizado = Cenario(
-          id: cenarioAtual.id,
-          nome: novo.nome,
-          dispositivos: novo.dispositivos);
+      final atualizado =
+          Cenario(id: cenarioAtual.id, nome: novo.nome, dispositivos: novo.dispositivos);
       await CenarioService.salvarCenario(atualizado);
       setState(() {
         cenarios[index] = atualizado;
@@ -927,129 +1195,92 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      appBar: AppBar(
-        backgroundColor: kGradientStart,
-        elevation: 0,
-        centerTitle: true,
-        leading: const Padding(
-          padding: EdgeInsets.only(left: 12),
-          child: CircleAvatar(
-            backgroundColor: kYellow,
-            child: Icon(Icons.home, color: Colors.black, size: 26),
-          ),
-        ),
-        title: const Text(
-          "Casa Inteligente",
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 23,
-            color: Colors.white,
-            letterSpacing: 0.5,
-          ),
-        ),
-        actions: [
-          if (_perfil?.role == 'admin')
-            IconButton(
-              icon: const Icon(Icons.history, color: Colors.white70, size: 26),
-              tooltip: "Logs de Dispositivos",
-              onPressed: () {
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const DeviceLogsPage()));
+    // Drawer precisa do perfil para liberar itens de admin
+    return FutureBuilder<PerfilUsuario?>(
+      future: _perfil == null && usuarioLogado != null
+          ? UserService.carregarPerfil(usuarioLogado!.uid)
+          : Future.value(_perfil),
+      builder: (context, s) {
+        final perfil = s.data ?? _perfil;
+        return Scaffold(
+          drawer: AppDrawer(perfil: perfil),
+          appBar: AppBar(
+            centerTitle: true,
+            title: InkWell(
+              onTap: () {
+                // voltar para a "tela inicial" da Home (tab 0)
+                setState(() {
+                  selectedTab = 0;
+                  _pageController.jumpToPage(0);
+                });
               },
-            ),
-          if (_perfil?.role == 'admin')
-            IconButton(
-              icon: const Icon(Icons.supervisor_account,
-                  color: Colors.white70, size: 26),
-              tooltip: "Controle de Usuários",
-              onPressed: () {
-                Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => const AdminUsersPage()));
-              },
-            ),
-          IconButton(
-            icon: const Icon(Icons.person, color: Colors.white70, size: 26),
-            tooltip: "Meu Perfil",
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const PerfilPage()),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white70, size: 26),
-            tooltip: "Sair",
-            onPressed: () async {
-              await FirebaseAuth.instance.signOut();
-              usuarioLogado = null;
-              if (!mounted) return;
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (_) => const LoginPage()),
-              );
-            },
-          ),
-          const SizedBox(width: 8)
-        ],
-      ),
-      body: Container(
-        width: double.infinity,
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [kGradientStart, kGradientEnd],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: Column(
-          children: [
-            Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 24.0, vertical: 4),
               child: Row(
-                children: [
-                  _modernTab(0, Icons.lightbulb, "Luzes"),
-                  _modernTab(1, Icons.air, "Ventilação"),
-                  _modernTab(2, Icons.garage, "Portão"),
-                  _modernTab(3, Icons.auto_awesome, "Cenários"),
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.home, color: kYellow, size: 22),
+                  SizedBox(width: 8),
+                  Text("Casa Inteligente"),
                 ],
               ),
             ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: PageView(
-                controller: _pageController,
-                onPageChanged: (index) {
-                  setState(() {
-                    selectedTab = index;
-                  });
-                },
-                children: [
-                  _buildTabContent(0),
-                  _buildTabContent(1),
-                  _buildTabContent(2),
-                  loadingCenarios
-                      ? const Center(child: CircularProgressIndicator())
-                      : CenariosPage(
-                          cenarios: cenarios,
-                          onSalvar: _adicionarOuEditarCenario,
-                          onExcluir: _excluirCenario,
-                          statusCenarios: statusCenarios,
-                          onStatusChanged: (index, valor) {
-                            setState(() {
-                              statusCenarios[index] = valor;
-                            });
-                          },
-                        )
-                ],
+          ),
+          body: Container(
+            width: double.infinity,
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [kGradientStart, kGradientEnd],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
             ),
-          ],
-        ),
-      ),
+            child: Column(
+              children: [
+                // Tabs custom (sem "Início" extra)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 4),
+                  child: Row(
+                    children: [
+                      _modernTab(0, Icons.lightbulb, "Luzes"),
+                      _modernTab(1, Icons.air, "Ventilação"),
+                      _modernTab(2, Icons.garage, "Portão"),
+                      _modernTab(3, Icons.auto_awesome, "Cenários"),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: PageView(
+                    controller: _pageController,
+                    onPageChanged: (index) {
+                      setState(() {
+                        selectedTab = index;
+                      });
+                    },
+                    children: [
+                      _buildTabContent(0),
+                      _buildTabContent(1),
+                      _buildTabContent(2),
+                      loadingCenarios
+                          ? const Center(child: CircularProgressIndicator())
+                          : CenariosPage(
+                              cenarios: cenarios,
+                              onSalvar: _adicionarOuEditarCenario,
+                              onExcluir: _excluirCenario,
+                              statusCenarios: statusCenarios,
+                              onStatusChanged: (index, valor) {
+                                setState(() {
+                                  statusCenarios[index] = valor;
+                                });
+                              },
+                            )
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1077,8 +1308,7 @@ class _HomePageState extends State<HomePage> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon,
-                  color: selected ? Colors.black : Colors.white54, size: 22),
+              Icon(icon, color: selected ? Colors.black : Colors.white54, size: 22),
               const SizedBox(width: 6),
               Text(label,
                   style: TextStyle(
@@ -1114,10 +1344,8 @@ class _HomePageState extends State<HomePage> {
                 quarto = v;
               });
               await enviarComandoEsp(v ? '/ligar/Sala' : '/desligar/Sala');
-              await enviarComandoEsp(
-                  v ? '/ligar/Cozinha' : '/desligar/Cozinha');
-              await enviarComandoEsp(
-                  v ? '/ligar/Banheiro' : '/desligar/Banheiro');
+              await enviarComandoEsp(v ? '/ligar/Cozinha' : '/desligar/Cozinha');
+              await enviarComandoEsp(v ? '/ligar/Banheiro' : '/desligar/Banheiro');
               await enviarComandoEsp(v ? '/ligar/Quarto' : '/desligar/Quarto');
 
               await DispositivoService.setStatus("Sala", v);
@@ -1150,8 +1378,7 @@ class _HomePageState extends State<HomePage> {
                 cozinha = v;
                 todasLuzes = sala && cozinha && banheiro && quarto;
               });
-              await enviarComandoEsp(
-                  v ? '/ligar/Cozinha' : '/desligar/Cozinha');
+              await enviarComandoEsp(v ? '/ligar/Cozinha' : '/desligar/Cozinha');
               await DispositivoService.setStatus("Cozinha", v);
             },
           ),
@@ -1165,8 +1392,7 @@ class _HomePageState extends State<HomePage> {
                 banheiro = v;
                 todasLuzes = sala && cozinha && banheiro && quarto;
               });
-              await enviarComandoEsp(
-                  v ? '/ligar/Banheiro' : '/desligar/Banheiro');
+              await enviarComandoEsp(v ? '/ligar/Banheiro' : '/desligar/Banheiro');
               await DispositivoService.setStatus("Banheiro", v);
             },
           ),
@@ -1200,9 +1426,7 @@ class _HomePageState extends State<HomePage> {
                 ventPrimeiroAndar = v;
               });
 
-              await enviarComandoEsp(
-                  v ? '/ventilador/ligar' : '/ventilador/desligar');
-
+              await enviarComandoEsp(v ? '/ventilador/ligar' : '/ventilador/desligar');
               await DispositivoService.setStatus("VentPrimeiroAndar", v);
             },
           ),
@@ -1214,9 +1438,7 @@ class _HomePageState extends State<HomePage> {
                 ventSegundoAndar = v;
               });
 
-              await enviarComandoEsp(
-                  v ? '/ventilador/ligar' : '/ventilador/desligar');
-
+              await enviarComandoEsp(v ? '/ventilador/ligar' : '/ventilador/desligar');
               await DispositivoService.setStatus("VentSegundoAndar", v);
             },
           ),
@@ -1245,10 +1467,7 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 18),
               const Text(
                 "Portão da Garagem",
-                style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 22),
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 22),
               ),
               const SizedBox(height: 12),
               Text(
@@ -1264,28 +1483,22 @@ class _HomePageState extends State<HomePage> {
                 width: double.infinity,
                 height: 52,
                 child: ElevatedButton.icon(
-                  icon: Icon(portaoAberto ? Icons.lock : Icons.lock_open,
-                      color: Colors.black, size: 28),
+                  icon: Icon(portaoAberto ? Icons.lock : Icons.lock_open, color: Colors.black, size: 28),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: kYellow,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     elevation: 0,
                   ),
                   onPressed: () async {
                     setState(() {
                       portaoAberto = !portaoAberto;
                     });
-                    await enviarComandoEsp(
-                        portaoAberto ? '/portao/abrir' : '/portao/fechar');
+                    await enviarComandoEsp(portaoAberto ? '/portao/abrir' : '/portao/fechar');
                     await DispositivoService.setStatus("Portao", portaoAberto);
                   },
                   label: Text(
                     portaoAberto ? "Fechar Portão" : "Abrir Portão",
-                    style: const TextStyle(
-                        color: Colors.black,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: Colors.black, fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                 ),
               ),
@@ -1326,28 +1539,16 @@ class _HomePageState extends State<HomePage> {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 19,
-                  ),
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 19),
                 ),
                 Text(
                   subtitle,
-                  style: const TextStyle(
-                    color: Colors.white54,
-                    fontSize: 15,
-                    fontWeight: FontWeight.normal,
-                  ),
+                  style: const TextStyle(color: Colors.white54, fontSize: 15, fontWeight: FontWeight.normal),
                 ),
               ],
             ),
           ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeColor: kYellow,
-          ),
+          Switch(value: value, onChanged: onChanged, activeColor: kYellow),
         ],
       ),
     );
@@ -1378,30 +1579,13 @@ class _HomePageState extends State<HomePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 19,
-                  ),
-                ),
-                Text(
-                  value ? "Ligado" : "Desligado",
-                  style: const TextStyle(
-                    color: Colors.white54,
-                    fontSize: 15,
-                    fontWeight: FontWeight.normal,
-                  ),
-                ),
+                Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 19)),
+                Text(value ? "Ligado" : "Desligado",
+                    style: const TextStyle(color: Colors.white54, fontSize: 15, fontWeight: FontWeight.normal)),
               ],
             ),
           ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeColor: kYellow,
-          ),
+          Switch(value: value, onChanged: onChanged, activeColor: kYellow),
         ],
       ),
     );
@@ -1414,140 +1598,91 @@ class PerfilPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final usuario = usuarioLogado;
+    final u = usuarioLogado;
 
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: kGradientStart,
-        elevation: 0,
-        title: const Text(
-          "Meu Perfil",
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 22,
-            color: Colors.white,
+    return FutureBuilder<PerfilUsuario?>(
+      future: (u != null) ? UserService.carregarPerfil(u.uid) : Future.value(null),
+      builder: (context, snap) {
+        final perfil = snap.data;
+        final nome = u?.nome ?? perfil?.nome ?? '';
+        final email = u?.email ?? perfil?.email ?? '';
+
+        return Scaffold(
+          drawer: AppDrawer(perfil: perfil),
+          appBar: AppBar(
+            centerTitle: true,
+            title: InkWell(
+              onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomePage())),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.home, color: kYellow, size: 22),
+                  SizedBox(width: 8),
+                  Text("Meu Perfil"),
+                ],
+              ),
+            ),
           ),
-        ),
-        centerTitle: true,
-      ),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [kGradientStart, kGradientEnd],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        width: double.infinity,
-        child: usuario == null
-            ? const Center(
-                child: Text(
-                  "Nenhum usuário encontrado.",
-                  style: TextStyle(color: Colors.white70, fontSize: 18),
-                ),
-              )
-            : FutureBuilder<PerfilUsuario?>(
-                future: UserService.carregarPerfil(usuario.uid),
-                builder: (context, snap) {
-                  final perfil = snap.data;
-                  return Column(
+          body: Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [kGradientStart, kGradientEnd],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+            ),
+            width: double.infinity,
+            child: u == null
+                ? const Center(
+                    child: Text("Nenhum usuário encontrado.",
+                        style: TextStyle(color: Colors.white70, fontSize: 18)),
+                  )
+                : Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       const CircleAvatar(
                         radius: 48,
                         backgroundColor: kYellow,
-                        child:
-                            Icon(Icons.person, size: 54, color: Colors.black),
+                        child: Icon(Icons.person, size: 54, color: Colors.black),
                       ),
                       const SizedBox(height: 18),
-                      if (usuario.nome != usuario.email)
-                        Text(
-                          usuario.nome,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      if (usuario.nome == usuario.email || usuario.nome.isEmpty)
-                        Text(
-                          usuario.email,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      if (usuario.nome != usuario.email)
+                      Text(
+                        (nome.isEmpty ? email : nome),
+                        style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
+                      ),
+                      if (nome.isNotEmpty) ...[
                         const SizedBox(height: 8),
-                      if (usuario.nome != usuario.email)
-                        Text(
-                          usuario.email,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 18,
-                          ),
-                        ),
+                        Text(email, style: const TextStyle(color: Colors.white70, fontSize: 18)),
+                      ],
                       if (perfil != null) ...[
                         const SizedBox(height: 8),
-                        Text(
-                          'Função: ${perfil.role} • ${perfil.ativo ? "ativo" : "inativo"}',
-                          style: const TextStyle(color: Colors.white70),
-                        ),
+                        Text('Função: ${perfil.role} • ${perfil.ativo ? "ativo" : "inativo"}',
+                            style: const TextStyle(color: Colors.white70)),
                       ],
-
-                      const SizedBox(height: 32),
-
+                      const SizedBox(height: 40),
                       ElevatedButton.icon(
-                        icon: const Icon(Icons.logout, color: Colors.black),
+                        icon: const Icon(Icons.edit, color: Colors.black),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: kYellow,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14)),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 22, vertical: 14),
-                        ),
-                        onPressed: () async {
-                          await FirebaseAuth.instance.signOut();
-                          usuarioLogado = null;
-                          Navigator.pushAndRemoveUntil(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => const LoginPage()),
-                            (route) => false,
-                          );
-                        },
-                        label: const Text(
-                          'Sair da Conta',
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 17,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      OutlinedButton.icon(
-                        icon: const Icon(Icons.edit, size: 18),
-                        label: const Text('Editar perfil'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          side: const BorderSide(color: Colors.white24),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
                         ),
                         onPressed: () {
                           Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) => const EditProfilePage()));
+                            context,
+                            MaterialPageRoute(builder: (_) => const EditProfilePage()),
+                          );
                         },
+                        label: const Text(
+                          'Editar Perfil',
+                          style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 17),
+                        ),
                       ),
                     ],
-                  );
-                },
-              ),
-      ),
+                  ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1947,7 +2082,6 @@ class _EditProfilePageState extends State<EditProfilePage> {
   }
 }
 
-
 // ---------- CENÁRIOS PAGE  -----------
 class CenariosPage extends StatefulWidget {
   final List<Cenario> cenarios;
@@ -1979,16 +2113,14 @@ class _CenariosPageState extends State<CenariosPage> {
         await enviarComandoEsp(estado ? '/portao/abrir' : '/portao/fechar');
         await DispositivoService.setStatus("Portao", estado);
       } else if (dispositivo == 'VentPrimeiroAndar') {
-        await enviarComandoEsp(
-            estado ? '/ventilador/ligar' : '/ventilador/desligar');
+        await enviarComandoEsp(estado ? '/ventilador/ligar' : '/ventilador/desligar');
         await DispositivoService.setStatus("VentPrimeiroAndar", estado);
       } else if (dispositivo == 'VentSegundoAndar') {
-        await enviarComandoEsp(
-            estado ? '/ventilador/ligar' : '/ventilador/desligar');
+        await enviarComandoEsp(estado ? '/ventilador/ligar' : '/ventilador/desligar');
         await DispositivoService.setStatus("VentSegundoAndar", estado);
       } else {
-        await enviarComandoEsp(
-            estado ? '/ligar/$dispositivo' : '/desligar/$dispositivo');
+        // Luzes
+        await enviarComandoEsp(estado ? '/ligar/$dispositivo' : '/desligar/$dispositivo');
         await DispositivoService.setStatus(dispositivo, estado);
       }
     }
@@ -2009,13 +2141,8 @@ class _CenariosPageState extends State<CenariosPage> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                "Cenários Salvos",
-                style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white),
-              ),
+              const Text("Cenários Salvos",
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
               ElevatedButton.icon(
                 onPressed: () {
                   showDialog(
@@ -2032,8 +2159,8 @@ class _CenariosPageState extends State<CenariosPage> {
                 },
                 icon: const Icon(Icons.add),
                 label: const Text("Novo Cenário"),
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: kYellow, foregroundColor: Colors.black),
+                style:
+                    ElevatedButton.styleFrom(backgroundColor: kYellow, foregroundColor: Colors.black),
               )
             ],
           ),
@@ -2041,8 +2168,8 @@ class _CenariosPageState extends State<CenariosPage> {
         Expanded(
           child: cenarios.isEmpty
               ? const Center(
-                  child: Text("Nenhum cenário criado ainda.",
-                      style: TextStyle(color: Colors.white70)),
+                  child:
+                      Text("Nenhum cenário criado ainda.", style: TextStyle(color: Colors.white70)),
                 )
               : ListView.builder(
                   itemCount: cenarios.length,
@@ -2051,11 +2178,9 @@ class _CenariosPageState extends State<CenariosPage> {
                     final ligado = widget.statusCenarios[index] ?? false;
                     return Card(
                       color: Colors.white10,
-                      margin: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
+                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: ListTile(
-                        title: Text(c.nome,
-                            style: const TextStyle(color: Colors.white)),
+                        title: Text(c.nome, style: const TextStyle(color: Colors.white)),
                         subtitle: Text(
                           c.dispositivos.entries
                                   .where((e) => e.value)
@@ -2068,8 +2193,7 @@ class _CenariosPageState extends State<CenariosPage> {
                           spacing: 4,
                           children: [
                             IconButton(
-                              icon: const Icon(Icons.edit,
-                                  color: Colors.orangeAccent),
+                              icon: const Icon(Icons.edit, color: Colors.orangeAccent),
                               onPressed: () {
                                 showDialog(
                                   context: context,
@@ -2087,8 +2211,7 @@ class _CenariosPageState extends State<CenariosPage> {
                               tooltip: 'Editar',
                             ),
                             IconButton(
-                              icon: const Icon(Icons.delete,
-                                  color: Colors.redAccent),
+                              icon: const Icon(Icons.delete, color: Colors.redAccent),
                               onPressed: () {
                                 widget.onExcluir(index);
                                 widget.onStatusChanged(index, false);
@@ -2101,14 +2224,9 @@ class _CenariosPageState extends State<CenariosPage> {
                               onChanged: (v) async {
                                 widget.onStatusChanged(index, v);
                                 await _executarCenario(c, v);
-                                if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
-                                    content: Text(
-                                      v
-                                          ? 'Cenário ativado!'
-                                          : 'Cenário desativado!',
-                                    ),
+                                    content: Text(v ? 'Cenário ativado!' : 'Cenário desativado!'),
                                     duration: const Duration(seconds: 1),
                                   ),
                                 );
@@ -2198,8 +2316,7 @@ class _CenarioFormState extends State<CenarioForm> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text("Cenário",
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text("Cenário", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             TextField(
               controller: nomeController,
               decoration: const InputDecoration(labelText: 'Nome do Cenário'),
@@ -2208,14 +2325,10 @@ class _CenarioFormState extends State<CenarioForm> {
             ...dispositivosSelecionados.keys.map((key) => CheckboxListTile(
                   title: Text(label(key)),
                   value: dispositivosSelecionados[key],
-                  onChanged: (v) => setState(
-                      () => dispositivosSelecionados[key] = v ?? false),
+                  onChanged: (v) => setState(() => dispositivosSelecionados[key] = v ?? false),
                 )),
             const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: _salvar,
-              child: const Text("Salvar Cenário"),
-            ),
+            ElevatedButton(onPressed: _salvar, child: const Text("Salvar Cenário"))
           ],
         ),
       ),
@@ -2232,11 +2345,10 @@ class DeviceLogsPage extends StatefulWidget {
 }
 
 class _DeviceLogsPageState extends State<DeviceLogsPage> {
-  // filtros
-  String? _device; // ex: "Sala", "VentPrimeiroAndar"...
-  String? _userUid; // uid do usuário
-  DateTime? _from; // data inicial (00:00)
-  DateTime? _to; // data final (23:59)
+  String? _device;
+  String? _userUid;
+  DateTime? _from;
+  DateTime? _to;
 
   static const _knownDevices = <String>[
     'Sala',
@@ -2269,8 +2381,7 @@ class _DeviceLogsPageState extends State<DeviceLogsPage> {
         if (isFrom) {
           _from = DateTime(picked.year, picked.month, picked.day, 0, 0, 0);
         } else {
-          _to =
-              DateTime(picked.year, picked.month, picked.day, 23, 59, 59, 999);
+          _to = DateTime(picked.year, picked.month, picked.day, 23, 59, 59, 999);
         }
       });
     }
@@ -2293,199 +2404,219 @@ class _DeviceLogsPageState extends State<DeviceLogsPage> {
       q = q.where('ts', isLessThanOrEqualTo: Timestamp.fromDate(_to!));
     }
 
+    // range por ts exige orderBy(ts)
     q = q.orderBy('ts', descending: true).limit(500);
     return q;
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: kGradientStart,
-        title: const Text('Logs de Dispositivos'),
-        actions: [
-          IconButton(
-            tooltip: 'Limpar filtros',
-            icon: const Icon(Icons.filter_alt_off),
-            onPressed: () => setState(() {
-              _device = null;
-              _userUid = null;
-              _from = null;
-              _to = null;
-            }),
+    return FutureBuilder<PerfilUsuario?>(
+      future: (usuarioLogado == null)
+          ? Future.value(null)
+          : UserService.carregarPerfil(usuarioLogado!.uid),
+      builder: (context, snap) {
+        final isAdmin = snap.data?.role == 'admin';
+        return Scaffold(
+          drawer: AppDrawer(perfil: snap.data),
+          appBar: AppBar(
+            centerTitle: true,
+            title: InkWell(
+              onTap: () => Navigator.pushReplacement(
+                  context, MaterialPageRoute(builder: (_) => const HomePage())),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.home, color: kYellow, size: 22),
+                  SizedBox(width: 8),
+                  Text('Logs de Dispositivos'),
+                ],
+              ),
+            ),
           ),
-        ],
-      ),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-              colors: [kGradientStart, kGradientEnd],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight),
-        ),
-        child: Column(
-          children: [
-            // --------- Barra de filtros ----------
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-              child: Column(
-                children: [
-                  Row(
+          body: !isAdmin
+              ? const Center(
+                  child: Text('Apenas administradores podem visualizar os logs.',
+                      style: TextStyle(color: Colors.white70)))
+              : Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                        colors: [kGradientStart, kGradientEnd],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight),
+                  ),
+                  child: Column(
                     children: [
-                      // Dispositivo
-                      Expanded(
-                        child: DropdownButtonFormField<String?>(
-                          value: _device,
-                          isDense: true,
-                          dropdownColor: const Color(0xFF222C36),
-                          decoration: const InputDecoration(
-                            labelText: 'Dispositivo',
-                            filled: true,
-                            fillColor: Colors.black26,
-                            border: OutlineInputBorder(),
-                          ),
-                          items: [
-                            const DropdownMenuItem<String?>(
-                                value: null, child: Text('Todos')),
-                            ..._knownDevices.map(
-                              (d) => DropdownMenuItem<String?>(
-                                  value: d, child: Text(d)),
+                      // Filtros
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: [
+                                // Dispositivo
+                                Expanded(
+                                  child: DropdownButtonFormField<String?>(
+                                    value: _device,
+                                    isDense: true,
+                                    dropdownColor: const Color(0xFF222C36),
+                                    decoration: const InputDecoration(
+                                      labelText: 'Dispositivo',
+                                      filled: true,
+                                      fillColor: Colors.black26,
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    items: [
+                                      const DropdownMenuItem<String?>(
+                                          value: null, child: Text('Todos')),
+                                      ..._knownDevices.map(
+                                        (d) => DropdownMenuItem<String?>(
+                                            value: d, child: Text(d)),
+                                      ),
+                                    ],
+                                    onChanged: (v) => setState(() => _device = v),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                // Usuário
+                                Expanded(
+                                  child: StreamBuilder<List<PerfilUsuario>>(
+                                    stream: UserService.streamTodos(),
+                                    builder: (context, s) {
+                                      final itens = <DropdownMenuItem<String?>>[
+                                        const DropdownMenuItem(
+                                          value: null,
+                                          child: Text('Todos os usuários'),
+                                        ),
+                                      ];
+                                      final users = (s.data ?? []);
+                                      itens.addAll(users.map((u) => DropdownMenuItem(
+                                            value: u.uid,
+                                            child: Text(u.nome.isEmpty ? u.email : u.nome),
+                                          )));
+                                      return DropdownButtonFormField<String?>(
+                                        value: _userUid,
+                                        isDense: true,
+                                        dropdownColor: const Color(0xFF222C36),
+                                        decoration: const InputDecoration(
+                                          labelText: 'Usuário',
+                                          filled: true,
+                                          fillColor: Colors.black26,
+                                          border: OutlineInputBorder(),
+                                        ),
+                                        items: itens,
+                                        onChanged: (v) => setState(() => _userUid = v),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: () => _pickDate(isFrom: true),
+                                    icon: const Icon(Icons.calendar_today, size: 18),
+                                    label: Text('De: ${_fmtDate(_from)}'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.white,
+                                      side: const BorderSide(color: Colors.white24),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: () => _pickDate(isFrom: false),
+                                    icon: const Icon(Icons.calendar_month, size: 18),
+                                    label: Text('Até: ${_fmtDate(_to)}'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.white,
+                                      side: const BorderSide(color: Colors.white24),
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Limpar filtros',
+                                  icon: const Icon(Icons.filter_alt_off),
+                                  onPressed: () => setState(() {
+                                    _device = null;
+                                    _userUid = null;
+                                    _from = null;
+                                    _to = null;
+                                  }),
+                                ),
+                              ],
                             ),
                           ],
-                          onChanged: (v) => setState(() => _device = v),
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      // Usuário (dropdown populado via stream de perfis)
+                      const Divider(color: Colors.white12, height: 1),
+                      // Lista
                       Expanded(
-                        child: StreamBuilder<List<PerfilUsuario>>(
-                          stream: UserService.streamTodos(),
-                          builder: (context, s) {
-                            final itens = <DropdownMenuItem<String?>>[
-                              const DropdownMenuItem(
-                                value: null,
-                                child: Text('Todos os usuários'),
-                              ),
-                            ];
-                            final users = (s.data ?? []);
-                            itens.addAll(users.map((u) => DropdownMenuItem(
-                                  value: u.uid,
-                                  child:
-                                      Text(u.nome.isEmpty ? u.email : u.nome),
-                                )));
-                            return DropdownButtonFormField<String?>(
-                              value: _userUid,
-                              isDense: true,
-                              dropdownColor: const Color(0xFF222C36),
-                              decoration: const InputDecoration(
-                                labelText: 'Usuário',
-                                filled: true,
-                                fillColor: Colors.black26,
-                                border: OutlineInputBorder(),
-                              ),
-                              items: itens,
-                              onChanged: (v) => setState(() => _userUid = v),
+                        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                          stream: _buildQuery().snapshots(),
+                          builder: (context, snap) {
+                            if (snap.hasError) {
+                              return Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Text(
+                                    'Erro ao carregar logs:\n${snap.error}\n\n'
+                                    'Se aparecer "requires index", toque no link do console para criar o índice.',
+                                    style:
+                                        const TextStyle(color: Colors.redAccent),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ),
+                              );
+                            }
+                            if (snap.connectionState == ConnectionState.waiting) {
+                              return const Center(child: CircularProgressIndicator());
+                            }
+                            final docs = snap.data?.docs ?? [];
+                            if (docs.isEmpty) {
+                              return const Center(
+                                child: Text('Sem logs para os filtros selecionados',
+                                    style: TextStyle(color: Colors.white70)),
+                              );
+                            }
+                            return ListView.separated(
+                              itemCount: docs.length,
+                              separatorBuilder: (_, __) =>
+                                  const Divider(color: Colors.white12, height: 1),
+                              itemBuilder: (context, i) {
+                                final d = docs[i].data();
+                                final dispositivo = d['dispositivo'] ?? '';
+                                final ligado = d['ligado'] == true;
+                                final nome = d['nome'] ?? '';
+                                final email = d['email'] ?? '';
+                                final ts = (d['ts'] as Timestamp?)?.toDate();
+                                final quando = ts != null
+                                    ? '${ts.day.toString().padLeft(2, '0')}/${ts.month.toString().padLeft(2, '0')} '
+                                        '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}'
+                                    : '';
+
+                                return ListTile(
+                                  title: Text(
+                                      '$dispositivo  •  ${ligado ? "Ligado" : "Desligado"}',
+                                      style: const TextStyle(color: Colors.white)),
+                                  subtitle: Text('$nome  •  $email  •  $quando',
+                                      style:
+                                          const TextStyle(color: Colors.white60)),
+                                );
+                              },
                             );
                           },
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: () => _pickDate(isFrom: true),
-                          icon: const Icon(Icons.calendar_today, size: 18),
-                          label: Text('De: ${_fmtDate(_from)}'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.white,
-                            side: const BorderSide(color: Colors.white24),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: () => _pickDate(isFrom: false),
-                          icon: const Icon(Icons.calendar_month, size: 18),
-                          label: Text('Até: ${_fmtDate(_to)}'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.white,
-                            side: const BorderSide(color: Colors.white24),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const Divider(color: Colors.white12, height: 1),
-
-            // --------- Lista de logs (stream com filtros) ----------
-            Expanded(
-              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                stream: _buildQuery().snapshots(),
-                builder: (context, snap) {
-                  if (snap.hasError) {
-                    return Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Text(
-                          'Erro ao carregar logs:\n${snap.error}\n\n'
-                          'Se aparecer "requires index", abra o link para criar o índice no console.',
-                          style: const TextStyle(color: Colors.redAccent),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    );
-                  }
-                  if (snap.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  final docs = snap.data?.docs ?? [];
-                  if (docs.isEmpty) {
-                    return const Center(
-                      child: Text('Sem logs para os filtros selecionados',
-                          style: TextStyle(color: Colors.white70)),
-                    );
-                  }
-                  return ListView.separated(
-                    itemCount: docs.length,
-                    separatorBuilder: (_, __) =>
-                        const Divider(color: Colors.white12, height: 1),
-                    itemBuilder: (context, i) {
-                      final d = docs[i].data();
-                      final dispositivo = d['dispositivo'] ?? '';
-                      final ligado = d['ligado'] == true;
-                      final nome = d['nome'] ?? '';
-                      final email = d['email'] ?? '';
-                      final ts = (d['ts'] as Timestamp?)?.toDate();
-                      final quando = ts != null
-                          ? '${ts.day.toString().padLeft(2, '0')}/${ts.month.toString().padLeft(2, '0')} '
-                              '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}'
-                          : '';
-
-                      return ListTile(
-                        title: Text(
-                          '$dispositivo  •  ${ligado ? "Ligado" : "Desligado"}',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                        subtitle: Text(
-                          '$nome  •  $email  •  $quando',
-                          style: const TextStyle(color: Colors.white60),
-                        ),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
+                ),
+        );
+      },
     );
   }
 }
@@ -2503,209 +2634,208 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: kGradientStart,
-        title: const Text('Controle de Usuários'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => setState(() {}),
-          ),
-        ],
-      ),
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-              colors: [kGradientStart, kGradientEnd],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight),
-        ),
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: TextField(
-                onChanged: (v) =>
-                    setState(() => _query = v.trim().toLowerCase()),
-                decoration: InputDecoration(
-                  hintText: 'Buscar por nome ou e-mail...',
-                  filled: true,
-                  fillColor: Colors.black26,
-                  prefixIcon: const Icon(Icons.search),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                ),
+    return FutureBuilder<PerfilUsuario?>(
+      future: (usuarioLogado == null)
+          ? Future.value(null)
+          : UserService.carregarPerfil(usuarioLogado!.uid),
+      builder: (context, snap) {
+        final perfil = snap.data;
+        final isAdmin = (perfil?.role == 'admin');
+        return Scaffold(
+          drawer: AppDrawer(perfil: perfil),
+          appBar: AppBar(
+            centerTitle: true,
+            title: InkWell(
+              onTap: () => Navigator.pushReplacement(
+                  context, MaterialPageRoute(builder: (_) => const HomePage())),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.home, color: kYellow, size: 22),
+                  SizedBox(width: 8),
+                  Text('Controle de Usuários'),
+                ],
               ),
             ),
-            Expanded(
-              child: StreamBuilder<List<PerfilUsuario>>(
-                stream: UserService.streamTodos(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  final lista = (snapshot.data ?? []).where((p) {
-                    if (_query.isEmpty) return true;
-                    return p.nome.toLowerCase().contains(_query) ||
-                        p.email.toLowerCase().contains(_query);
-                  }).toList();
+          ),
+          body: !isAdmin
+              ? const Center(
+                  child: Text('Apenas administradores podem acessar esta tela.',
+                      style: TextStyle(color: Colors.white70)))
+              : Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                        colors: [kGradientStart, kGradientEnd],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight),
+                  ),
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: TextField(
+                          onChanged: (v) => setState(() => _query = v.trim().toLowerCase()),
+                          decoration: InputDecoration(
+                            hintText: 'Buscar por nome ou e-mail...',
+                            filled: true,
+                            fillColor: Colors.black26,
+                            prefixIcon: const Icon(Icons.search),
+                            border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: StreamBuilder<List<PerfilUsuario>>(
+                          stream: UserService.streamTodos(),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              return const Center(child: CircularProgressIndicator());
+                            }
+                            final lista = (snapshot.data ?? []).where((p) {
+                              if (_query.isEmpty) return true;
+                              return p.nome.toLowerCase().contains(_query) ||
+                                  p.email.toLowerCase().contains(_query);
+                            }).toList();
 
-                  if (lista.isEmpty) {
-                    return const Center(
-                        child: Text('Nenhum usuário encontrado',
-                            style: TextStyle(color: Colors.white70)));
-                  }
+                            if (lista.isEmpty) {
+                              return const Center(
+                                  child: Text('Nenhum usuário encontrado',
+                                      style: TextStyle(color: Colors.white70)));
+                            }
 
-                  return ListView.separated(
-                    itemCount: lista.length,
-                    separatorBuilder: (_, __) =>
-                        const Divider(color: Colors.white12, height: 1),
-                    itemBuilder: (_, i) {
-                      final p = lista[i];
-                      return ListTile(
-                        title: Text(p.nome.isEmpty ? p.email : p.nome,
-                            style: const TextStyle(color: Colors.white)),
-                        subtitle: Text(
-                            '${p.email}  •  ${p.role}  •  ${p.ativo ? "ativo" : "inativo"}',
-                            style: const TextStyle(color: Colors.white60)),
-                        trailing: Wrap(
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: 8,
-                          children: [
-                            // Trocar role
-                            DropdownButtonHideUnderline(
-                              child: DropdownButton<String>(
-                                value: p.role,
-                                dropdownColor: const Color(0xFF222C36),
-                                items: const [
-                                  DropdownMenuItem(
-                                      value: 'user', child: Text('user')),
-                                  DropdownMenuItem(
-                                      value: 'admin', child: Text('admin')),
-                                ],
-                                onChanged: (v) async {
-                                  if (v == null) return;
-                                  await UserService.atualizarCampo(
-                                      p.uid, {'role': v});
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content:
-                                            Text('Role de ${p.email} → $v')),
-                                  );
-                                },
-                              ),
-                            ),
-                            // Ativar/desativar
-                            Switch(
-                              value: p.ativo,
-                              activeColor: kYellow,
-                              onChanged: (v) async {
-                                await UserService.atualizarCampo(
-                                    p.uid, {'ativo': v});
-                                if (!mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                      content: Text(v
-                                          ? 'Conta ativada'
-                                          : 'Conta desativada')),
-                                );
-                              },
-                            ),
-                            // Reset de senha
-                            IconButton(
-                              tooltip: 'Enviar e-mail de redefinição de senha',
-                              icon: const Icon(Icons.lock_reset,
-                                  color: Colors.orangeAccent),
-                              onPressed: () async {
-                                try {
-                                  await FirebaseAuth.instance
-                                      .sendPasswordResetEmail(email: p.email);
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content: Text(
-                                            'Reset de senha enviado para ${p.email}')),
-                                  );
-                                } catch (e) {
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text('Erro: $e')),
-                                  );
-                                }
-                              },
-                            ),
-                            // Exclusão via Cloud Function
-                            IconButton(
-                              tooltip: 'Excluir conta',
-                              icon: const Icon(Icons.delete_forever,
-                                  color: Colors.redAccent),
-                              onPressed: () async {
-                                final ok = await showDialog<bool>(
-                                  context: context,
-                                  builder: (_) => AlertDialog(
-                                    title: const Text('Excluir usuário?'),
-                                    content: Text(
-                                        'Isso excluirá permanentemente a conta de ${p.email}. Esta ação é irreversível.'),
-                                    actions: [
-                                      TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context, false),
-                                          child: const Text('Cancelar')),
-                                      TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context, true),
-                                          child: const Text('Excluir')),
+                            return ListView.separated(
+                              itemCount: lista.length,
+                              separatorBuilder: (_, __) =>
+                                  const Divider(color: Colors.white12, height: 1),
+                              itemBuilder: (_, i) {
+                                final p = lista[i];
+                                return ListTile(
+                                  title: Text(p.nome.isEmpty ? p.email : p.nome,
+                                      style: const TextStyle(color: Colors.white)),
+                                  subtitle: Text(
+                                      '${p.email}  •  ${p.role}  •  ${p.ativo ? "ativo" : "inativo"}',
+                                      style:
+                                          const TextStyle(color: Colors.white60)),
+                                  trailing: Wrap(
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    spacing: 8,
+                                    children: [
+                                      DropdownButtonHideUnderline(
+                                        child: DropdownButton<String>(
+                                          value: p.role,
+                                          dropdownColor: const Color(0xFF222C36),
+                                          items: const [
+                                            DropdownMenuItem(value: 'user', child: Text('user')),
+                                            DropdownMenuItem(value: 'admin', child: Text('admin')),
+                                          ],
+                                          onChanged: (v) async {
+                                            if (v == null) return;
+                                            await UserService.atualizarCampo(p.uid, {'role': v});
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(content: Text('Role de ${p.email} → $v')),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      Switch(
+                                        value: p.ativo,
+                                        activeColor: kYellow,
+                                        onChanged: (v) async {
+                                          await UserService.atualizarCampo(p.uid, {'ativo': v});
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(
+                                                content: Text(
+                                                    v ? 'Conta ativada' : 'Conta desativada')),
+                                          );
+                                        },
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Enviar e-mail de redefinição de senha',
+                                        icon: const Icon(Icons.lock_reset,
+                                            color: Colors.orangeAccent),
+                                        onPressed: () async {
+                                          try {
+                                            await FirebaseAuth.instance
+                                                .sendPasswordResetEmail(email: p.email);
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                  content: Text(
+                                                      'Reset de senha enviado para ${p.email}')),
+                                            );
+                                          } catch (e) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(content: Text('Erro: $e')),
+                                            );
+                                          }
+                                        },
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Excluir conta',
+                                        icon: const Icon(Icons.delete_forever,
+                                            color: Colors.redAccent),
+                                        onPressed: () async {
+                                          final ok = await showDialog<bool>(
+                                            context: context,
+                                            builder: (_) => AlertDialog(
+                                              title: const Text('Excluir usuário?'),
+                                              content: Text(
+                                                  'Isso excluirá permanentemente a conta de ${p.email}.'),
+                                              actions: [
+                                                TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(context, false),
+                                                    child: const Text('Cancelar')),
+                                                TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.pop(context, true),
+                                                    child: const Text('Excluir')),
+                                              ],
+                                            ),
+                                          );
+                                          if (ok != true) return;
+
+                                          try {
+                                            final callable = FirebaseFunctions.instance
+                                                .httpsCallable('adminDeleteUser');
+                                            await callable.call(<String, dynamic>{'uid': p.uid});
+
+                                            await FirebaseFirestore.instance
+                                                .collection('usuarios')
+                                                .doc(p.uid)
+                                                .delete();
+
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(
+                                                  content:
+                                                      Text('Usuário excluído com sucesso')),
+                                            );
+                                          } on FirebaseFunctionsException catch (e) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                  content: Text(
+                                                      'Erro: ${e.message ?? e.code}')),
+                                            );
+                                          } catch (e) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(content: Text('Erro ao excluir: $e')),
+                                            );
+                                          }
+                                        },
+                                      ),
                                     ],
                                   ),
                                 );
-                                if (ok != true) return;
-
-                                try {
-                                  final callable = FirebaseFunctions.instance
-                                      .httpsCallable('adminDeleteUser');
-                                  await callable
-                                      .call(<String, dynamic>{'uid': p.uid});
-
-                                  await FirebaseFirestore.instance
-                                      .collection('usuarios')
-                                      .doc(p.uid)
-                                      .delete();
-
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text(
-                                            'Usuário excluído com sucesso')),
-                                  );
-                                } on FirebaseFunctionsException catch (e) {
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content: Text(
-                                            'Erro: ${e.message ?? e.code}')),
-                                  );
-                                } catch (e) {
-                                  if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content: Text('Erro ao excluir: $e')),
-                                  );
-                                }
                               },
-                            ),
-                          ],
+                            );
+                          },
                         ),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
+                      ),
+                    ],
+                  ),
+                ),
+        );
+      },
     );
   }
 }
